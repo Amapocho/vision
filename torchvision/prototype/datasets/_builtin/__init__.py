@@ -11,6 +11,7 @@ from .imagenet import ImageNet
 from .mnist import MNIST, FashionMNIST, KMNIST, EMNIST, QMNIST
 from .oxford_iiit_pet import OxfordIITPet
 from .pcam import PCAM
+from .renderedsst2 import RenderedSST2
 from .sbd import SBD
 from .semeion import SEMEION
 from .svhn import SVHN
