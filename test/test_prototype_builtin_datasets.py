@@ -1,14 +1,22 @@
+import functools
 import io
+import pickle
 from pathlib import Path
 
 import pytest
 import torch
 from builtin_dataset_mocks import parametrize_dataset_mocks, DATASET_MOCKS
+from torch.testing._comparison import assert_equal, TensorLikePair, ObjectPair
 from torch.utils.data.datapipes.iter.grouping import ShardingFilterIterDataPipe as ShardingFilter
 from torch.utils.data.graph import traverse
 from torchdata.datapipes.iter import IterDataPipe, Shuffler
+from torchvision._utils import sequence_to_str
 from torchvision.prototype import transforms, datasets
-from torchvision.prototype.utils._internal import sequence_to_str
+
+
+assert_samples_equal = functools.partial(
+    assert_equal, pair_types=(TensorLikePair, ObjectPair), rtol=0, atol=0, equal_nan=True
+)
 
 
 @pytest.fixture
@@ -45,6 +53,8 @@ class TestCommon:
 
         try:
             sample = next(iter(dataset))
+        except StopIteration:
+            raise AssertionError("Unable to draw any sample.") from None
         except Exception as error:
             raise AssertionError("Drawing a sample raised the error above.") from error
 
@@ -100,29 +110,15 @@ class TestCommon:
 
         next(iter(dataset.map(transforms.Identity())))
 
-    @parametrize_dataset_mocks(
-        DATASET_MOCKS,
-        marks={
-            "cub200": pytest.mark.xfail(
-                reason="See https://github.com/pytorch/vision/pull/5187#issuecomment-1015479165"
-            )
-        },
-    )
-    def test_traversable(self, test_home, dataset_mock, config):
+    @parametrize_dataset_mocks(DATASET_MOCKS)
+    def test_serializable(self, test_home, dataset_mock, config):
         dataset_mock.prepare(test_home, config)
 
         dataset = datasets.load(dataset_mock.name, **config)
 
-        traverse(dataset)
+        pickle.dumps(dataset)
 
-    @parametrize_dataset_mocks(
-        DATASET_MOCKS,
-        marks={
-            "cub200": pytest.mark.xfail(
-                reason="See https://github.com/pytorch/vision/pull/5187#issuecomment-1015479165"
-            )
-        },
-    )
+    @parametrize_dataset_mocks(DATASET_MOCKS)
     @pytest.mark.parametrize("annotation_dp_type", (Shuffler, ShardingFilter))
     def test_has_annotations(self, test_home, dataset_mock, config, annotation_dp_type):
         def scan(graph):
@@ -136,6 +132,17 @@ class TestCommon:
 
         if not any(type(dp) is annotation_dp_type for dp in scan(traverse(dataset))):
             raise AssertionError(f"The dataset doesn't contain a {annotation_dp_type.__name__}() datapipe.")
+
+    @parametrize_dataset_mocks(DATASET_MOCKS)
+    def test_save_load(self, test_home, dataset_mock, config):
+        dataset_mock.prepare(test_home, config)
+        dataset = datasets.load(dataset_mock.name, **config)
+        sample = next(iter(dataset))
+
+        with io.BytesIO() as buffer:
+            torch.save(sample, buffer)
+            buffer.seek(0)
+            assert_samples_equal(torch.load(buffer), sample)
 
 
 @parametrize_dataset_mocks(DATASET_MOCKS["qmnist"])
@@ -171,5 +178,5 @@ class TestGTSRB:
         dataset = datasets.load(dataset_mock.name, **config)
 
         for sample in dataset:
-            label_from_path = int(Path(sample["image_path"]).parent.name)
+            label_from_path = int(Path(sample["path"]).parent.name)
             assert sample["label"] == label_from_path

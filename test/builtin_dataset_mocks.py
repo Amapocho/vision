@@ -19,8 +19,8 @@ import torch
 from datasets_utils import make_zip, make_tar, create_image_folder, create_image_file
 from torch.nn.functional import one_hot
 from torch.testing import make_tensor as _make_tensor
+from torchvision._utils import sequence_to_str
 from torchvision.prototype.datasets._api import find
-from torchvision.prototype.utils._internal import sequence_to_str
 
 make_tensor = functools.partial(_make_tensor, device="cpu")
 make_scalar = functools.partial(make_tensor, ())
@@ -432,50 +432,52 @@ def caltech256(info, root, config):
 
 @register_mock
 def imagenet(info, root, config):
-    wnids = tuple(info.extra.wnid_to_category.keys())
+    from scipy.io import savemat
+
+    categories = info.categories
+    wnids = [info.extra.category_to_wnid[category] for category in categories]
     if config.split == "train":
-        images_root = root / "ILSVRC2012_img_train"
-
         num_samples = len(wnids)
+        archive_name = "ILSVRC2012_img_train.tar"
 
+        files = []
         for wnid in wnids:
-            files = create_image_folder(
-                root=images_root,
+            create_image_folder(
+                root=root,
                 name=wnid,
                 file_name_fn=lambda image_idx: f"{wnid}_{image_idx:04d}.JPEG",
                 num_examples=1,
             )
-            make_tar(images_root, f"{wnid}.tar", files[0].parent)
+            files.append(make_tar(root, f"{wnid}.tar"))
     elif config.split == "val":
         num_samples = 3
-        files = create_image_folder(
-            root=root,
-            name="ILSVRC2012_img_val",
-            file_name_fn=lambda image_idx: f"ILSVRC2012_val_{image_idx + 1:08d}.JPEG",
-            num_examples=num_samples,
-        )
-        images_root = files[0].parent
+        archive_name = "ILSVRC2012_img_val.tar"
+        files = [create_image_file(root, f"ILSVRC2012_val_{idx + 1:08d}.JPEG") for idx in range(num_samples)]
+
+        devkit_root = root / "ILSVRC2012_devkit_t12"
+        data_root = devkit_root / "data"
+        data_root.mkdir(parents=True)
+
+        with open(data_root / "ILSVRC2012_validation_ground_truth.txt", "w") as file:
+            for label in torch.randint(0, len(wnids), (num_samples,)).tolist():
+                file.write(f"{label}\n")
+
+        num_children = 0
+        synsets = [
+            (idx, wnid, category, "", num_children, [], 0, 0)
+            for idx, (category, wnid) in enumerate(zip(categories, wnids), 1)
+        ]
+        num_children = 1
+        synsets.extend((0, "", "", "", num_children, [], 0, 0) for _ in range(5))
+        savemat(data_root / "meta.mat", dict(synsets=synsets))
+
+        make_tar(root, devkit_root.with_suffix(".tar.gz").name, compression="gz")
     else:  # config.split == "test"
-        images_root = root / "ILSVRC2012_img_test_v10102019"
+        num_samples = 5
+        archive_name = "ILSVRC2012_img_test_v10102019.tar"
+        files = [create_image_file(root, f"ILSVRC2012_test_{idx + 1:08d}.JPEG") for idx in range(num_samples)]
 
-        num_samples = 3
-
-        create_image_folder(
-            root=images_root,
-            name="test",
-            file_name_fn=lambda image_idx: f"ILSVRC2012_test_{image_idx + 1:08d}.JPEG",
-            num_examples=num_samples,
-        )
-    make_tar(root, f"{images_root.name}.tar", images_root)
-
-    devkit_root = root / "ILSVRC2012_devkit_t12"
-    devkit_root.mkdir()
-    data_root = devkit_root / "data"
-    data_root.mkdir()
-    with open(data_root / "ILSVRC2012_validation_ground_truth.txt", "w") as file:
-        for label in torch.randint(0, len(wnids), (num_samples,)).tolist():
-            file.write(f"{label}\n")
-    make_tar(root, f"{devkit_root}.tar.gz", devkit_root, compression="gz")
+    make_tar(root, archive_name, *files)
 
     return num_samples
 
@@ -667,14 +669,15 @@ def sbd(info, root, config):
 @register_mock
 def semeion(info, root, config):
     num_samples = 3
+    num_categories = len(info.categories)
 
     images = torch.rand(num_samples, 256)
-    labels = one_hot(torch.randint(len(info.categories), size=(num_samples,)))
+    labels = one_hot(torch.randint(num_categories, size=(num_samples,)), num_classes=num_categories)
     with open(root / "semeion.data", "w") as fh:
         for image, one_hot_label in zip(images, labels):
             image_columns = " ".join([f"{pixel.item():.4f}" for pixel in image])
             labels_columns = " ".join([str(label.item()) for label in one_hot_label])
-            fh.write(f"{image_columns} {labels_columns}\n")
+            fh.write(f"{image_columns} {labels_columns} \n")
 
     return num_samples
 
@@ -729,31 +732,32 @@ class VOCMockData:
     def _make_detection_ann_file(cls, root, name):
         def add_child(parent, name, text=None):
             child = ET.SubElement(parent, name)
-            child.text = text
+            child.text = str(text)
             return child
 
         def add_name(obj, name="dog"):
             add_child(obj, "name", name)
-            return name
 
-        def add_bndbox(obj, bndbox=None):
-            if bndbox is None:
-                bndbox = {"xmin": "1", "xmax": "2", "ymin": "3", "ymax": "4"}
+        def add_size(obj):
+            obj = add_child(obj, "size")
+            size = {"width": 0, "height": 0, "depth": 3}
+            for name, text in size.items():
+                add_child(obj, name, text)
 
+        def add_bndbox(obj):
             obj = add_child(obj, "bndbox")
+            bndbox = {"xmin": 1, "xmax": 2, "ymin": 3, "ymax": 4}
             for name, text in bndbox.items():
                 add_child(obj, name, text)
 
-            return bndbox
-
         annotation = ET.Element("annotation")
+        add_size(annotation)
         obj = add_child(annotation, "object")
-        data = dict(name=add_name(obj), bndbox=add_bndbox(obj))
+        add_name(obj)
+        add_bndbox(obj)
 
         with open(root / name, "wb") as fh:
             fh.write(ET.tostring(annotation))
-
-        return data
 
     @classmethod
     def generate(cls, root, *, year, trainval):
@@ -872,6 +876,34 @@ class CelebAMockData:
 @register_mock
 def celeba(info, root, config):
     return CelebAMockData.generate(root)[config.split]
+
+
+@register_mock
+def country211(info, root, config):
+    split_name_mapper = {
+        "train": "train",
+        "val": "valid",
+        "test": "test",
+    }
+    split_folder = pathlib.Path(root, "country211", split_name_mapper[config["split"]])
+    split_folder.mkdir(parents=True, exist_ok=True)
+
+    num_examples = {
+        "train": 3,
+        "val": 4,
+        "test": 5,
+    }[config["split"]]
+
+    classes = ("AD", "BS", "GR")
+    for cls in classes:
+        create_image_folder(
+            split_folder,
+            name=cls,
+            file_name_fn=lambda idx: f"{idx}.jpg",
+            num_examples=num_examples,
+        )
+    make_tar(root, f"{split_folder.parent.name}.tgz", split_folder.parent, compression="gz")
+    return num_examples * len(classes)
 
 
 @register_mock
@@ -1296,6 +1328,24 @@ def cub200(info, root, config):
 
 
 @register_mock
+def eurosat(info, root, config):
+    data_folder = root / "2750"
+    data_folder.mkdir(parents=True)
+
+    num_examples_per_class = 3
+    categories = ["AnnualCrop", "Forest"]
+    for category in categories:
+        create_image_folder(
+            root=data_folder,
+            name=category,
+            file_name_fn=lambda idx: f"{category}_{idx + 1}.jpg",
+            num_examples=num_examples_per_class,
+        )
+    make_zip(root, "EuroSAT.zip", data_folder)
+    return len(categories) * num_examples_per_class
+
+
+@register_mock
 def svhn(info, root, config):
     import scipy.io as sio
 
@@ -1340,3 +1390,44 @@ def pcam(info, root, config):
             compressed_file.write(compressed_data)
 
     return num_images
+
+
+@register_mock
+def stanford_cars(info, root, config):
+    import scipy.io as io
+    from numpy.core.records import fromarrays
+
+    num_samples = {"train": 5, "test": 7}[config["split"]]
+    num_categories = 3
+
+    devkit = root / "devkit"
+    devkit.mkdir(parents=True)
+
+    if config["split"] == "train":
+        images_folder_name = "cars_train"
+        annotations_mat_path = devkit / "cars_train_annos.mat"
+    else:
+        images_folder_name = "cars_test"
+        annotations_mat_path = root / "cars_test_annos_withlabels.mat"
+
+    create_image_folder(
+        root=root,
+        name=images_folder_name,
+        file_name_fn=lambda image_index: f"{image_index:5d}.jpg",
+        num_examples=num_samples,
+    )
+
+    make_tar(root, f"cars_{config.split}.tgz", images_folder_name)
+    bbox = np.random.randint(1, 200, num_samples, dtype=np.uint8)
+    classes = np.random.randint(1, num_categories + 1, num_samples, dtype=np.uint8)
+    fnames = [f"{i:5d}.jpg" for i in range(num_samples)]
+    rec_array = fromarrays(
+        [bbox, bbox, bbox, bbox, classes, fnames],
+        names=["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "class", "fname"],
+    )
+
+    io.savemat(annotations_mat_path, {"annotations": rec_array})
+    if config.split == "train":
+        make_tar(root, "car_devkit.tgz", devkit, compression="gz")
+
+    return num_samples
